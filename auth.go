@@ -155,6 +155,8 @@ func (a *Auth) ExchangeCode(ctx context.Context, opts ExchangeCodeOpts) (*Authen
 }
 
 // SendMagicLink sends a link to a specific e-mail address for passwordless auth.
+//
+// Deprecated: Use SignInWithOtp instead
 func (a *Auth) SendMagicLink(ctx context.Context, email string) error {
 	reqBody, _ := json.Marshal(map[string]string{"email": email})
 	reqURL := fmt.Sprintf("%s/%s/magiclink", a.client.BaseURL, AuthEndpoint)
@@ -172,6 +174,87 @@ func (a *Auth) SendMagicLink(ctx context.Context, email string) error {
 	}
 
 	return nil
+}
+
+type OtpSignInOptions struct {
+	Email      string `json:"email"`
+	Phone      string `json:"phone"`
+	RedirectTo string `url:"redirect_to"`
+	FlowType   FlowType
+}
+
+// SignInWithOtp sends a link to a specific e-mail address or phone number for passwordless auth.
+func (a *Auth) SignInWithOtp(ctx context.Context, opts OtpSignInOptions) error {
+	params, err := query.Values(opts)
+	if err != nil {
+		return err
+	}
+
+	// Make sure we only send one of email or phone
+	if opts.Email != "" && opts.Phone != "" {
+		return errors.New("only one of email or phone can be set")
+	}
+
+	if opts.FlowType == PKCE {
+		if opts.Phone != "" {
+			return errors.New("PKCE flow is not supported for phone numbers")
+		}
+		p, err := generatePKCEParams()
+		if err != nil {
+			return err
+		}
+
+		params.Add("code_challenge", p.Challenge)
+		params.Add("code_challenge_method", p.ChallengeMethod)
+	}
+
+	reqURL := fmt.Sprintf("%s/%s/otp?%s", a.client.BaseURL, AuthEndpoint, params.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, nil)
+	if err != nil {
+		return err
+	}
+
+	errRes := authError{}
+	hasCustomError, err := a.client.sendCustomRequest(req, nil, &errRes)
+	if err != nil {
+		return err
+	} else if hasCustomError {
+		return errors.New(fmt.Sprintf("%s", errRes.Message))
+	}
+
+	return nil
+}
+
+type VerifyOtpOptions struct {
+	Email string `json:"email"`
+	Phone string `json:"phone"`
+	Token string `json:"token"`
+}
+
+// VerifyOtp verifies the OTP token sent to the user.
+func (a *Auth) VerifyOtp(ctx context.Context, opts VerifyOtpOptions) (*AuthenticatedDetails, error) {
+	// Make sure we only send one of email or phone
+	if opts.Email != "" && opts.Phone != "" {
+		return nil, errors.New("only one of email or phone can be set")
+	}
+
+	reqBody, _ := json.Marshal(opts)
+	reqURL := fmt.Sprintf("%s/%s/verify", a.client.BaseURL, AuthEndpoint)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, err
+	}
+
+	res := AuthenticatedDetails{}
+	errRes := authError{}
+	hasCustomError, err := a.client.sendCustomRequest(req, &res, &errRes)
+	if err != nil {
+		return nil, err
+	} else if hasCustomError {
+		return nil, errors.New(fmt.Sprintf("%s", errRes.Message))
+	}
+
+	return &res, nil
 }
 
 type ProviderSignInOptions struct {
