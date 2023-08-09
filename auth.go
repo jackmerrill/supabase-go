@@ -177,52 +177,75 @@ func (a *Auth) SendMagicLink(ctx context.Context, email string) error {
 }
 
 type OtpSignInOptions struct {
-	Email      string `json:"email"`
-	Phone      string `json:"phone"`
-	RedirectTo string `url:"redirect_to"`
-	FlowType   FlowType
+	Email      string      `json:"email" url:"-"`
+	Phone      string      `json:"phone" url:"-"`
+	Data       interface{} `json:"data" url:"data,omitempty"`
+	RedirectTo string      `url:"redirect_to"`
+	FlowType   FlowType    `url:"-" json:"-"`
+
+	CodeChallenge       string `json:"code_challenge" url:"-"`        // Don't set this. Defaults to a random string
+	CodeChallengeMethod string `json:"code_challenge_method" url:"-"` // Don't set this. Defaults to S256
+}
+
+type OtpSignInDetails struct {
+	URL          string `json:"url"`
+	Phone        string `json:"phone"`
+	Email        string `json:"email"`
+	CodeVerifier string `json:"code_verifier"`
 }
 
 // SignInWithOtp sends a link to a specific e-mail address or phone number for passwordless auth.
-func (a *Auth) SignInWithOtp(ctx context.Context, opts OtpSignInOptions) error {
+func (a *Auth) SignInWithOtp(ctx context.Context, opts OtpSignInOptions) (*OtpSignInDetails, error) {
 	params, err := query.Values(opts)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Make sure we only send one of email or phone
 	if opts.Email != "" && opts.Phone != "" {
-		return errors.New("only one of email or phone can be set")
+		return nil, errors.New("only one of email or phone can be set")
 	}
+
+	details := &OtpSignInDetails{}
 
 	if opts.FlowType == PKCE {
 		if opts.Phone != "" {
-			return errors.New("PKCE flow is not supported for phone numbers")
+			return nil, errors.New("PKCE flow is not supported for phone numbers")
 		}
 		p, err := generatePKCEParams()
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		params.Add("code_challenge", p.Challenge)
-		params.Add("code_challenge_method", p.ChallengeMethod)
+		opts.CodeChallenge = p.Challenge
+		opts.CodeChallengeMethod = p.ChallengeMethod
+
+		details.CodeVerifier = p.Verifier
 	}
 
+	reqBody, _ := json.Marshal(opts)
 	reqURL := fmt.Sprintf("%s/%s/otp?%s", a.client.BaseURL, AuthEndpoint, params.Encode())
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewBuffer(reqBody))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	errRes := authError{}
 	hasCustomError, err := a.client.sendCustomRequest(req, nil, &errRes)
 	if err != nil {
-		return err
+		return nil, err
 	} else if hasCustomError {
-		return errors.New(fmt.Sprintf("%s", errRes.Message))
+		if req.Response.StatusCode == http.StatusTooManyRequests {
+			return nil, errors.New(fmt.Sprintf("too many requests, please wait %s", req.Response.Header.Get("retry-after")))
+		}
+		return nil, errors.New(fmt.Sprintf("%s", errRes.Message))
 	}
 
-	return nil
+	details.URL = reqURL
+	details.Email = opts.Email
+	details.Phone = opts.Phone
+
+	return details, nil
 }
 
 type VerifyOtpOptions struct {
